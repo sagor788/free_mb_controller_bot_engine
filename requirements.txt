@@ -1,4 +1,4 @@
+Flask[async]
 python-telegram-bot
-Flask
 aiohttp
 gunicorn
